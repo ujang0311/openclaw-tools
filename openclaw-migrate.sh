@@ -413,6 +413,7 @@ import json,glob
 m=glob.glob('$STAGE/*/manifest.json')
 print(((json.load(open(m[0])).get('paths') or {}).get('stateDir','')) if m else '')
 " 2>/dev/null || echo "")
+[ -s /tmp/oc-migrate-choff.py ] || curl -fsS -m 30 "$REPO_RAW/channel-off.py" -o /tmp/oc-migrate-choff.py 2>/dev/null || true
 REMAP=/tmp/remap-state-paths.py
 [ -s "$REMAP" ] || curl -fsS -m 30 "$REPO_RAW/remap-state-paths.py" -o "$REMAP" 2>/dev/null || true
 if [ -s "$REMAP" ]; then
@@ -424,29 +425,53 @@ if [ -s "$REMAP" ]; then
 else warn "helper remap tidak tersedia — lewati pemetaan path"; fi
 
 printf "\n"
+sec "[6/7] Migrasi (doctor --fix) & keamanan channel" "$(elapsed)"
+AS_OC="sudo -u $OC_USER -H env HOME=$OC_HOME OPENCLAW_HOME=$OC_HOME OPENCLAW_STATE_DIR=$STATE_DIR bash -lc"
+if [ "$OC_USER" = root ]; then AS_OC="env HOME=$OC_HOME OPENCLAW_HOME=$OC_HOME OPENCLAW_STATE_DIR=$STATE_DIR bash -lc"; fi
+# migrasi skema DB/konvergensi config HARUS selesai sebelum CLI boleh menulis config
+if hb "openclaw doctor --fix (service mati)" bash -c "$AS_OC 'cd $OC_HOME && timeout 300 openclaw doctor --fix 2>&1 | tail -3'"; then
+  ok "migrasi/konvergensi selesai ${GRY}(${HB_ELAPSED}s)${R}"
+else warn "doctor --fix melaporkan catatan — cek: openclaw doctor"; fi
+chown -R "$OC_USER:$OC_GROUP" "$STATE_DIR" 2>/dev/null || true
+
+ch_state() { python3 -c "
+import json
+d=json.load(open('$STATE_DIR/openclaw.json'))
+print(' '.join('%s=%s' % (k, (v or {}).get('enabled')) for k,v in (d.get('channels') or {}).items()))" 2>/dev/null; }
+
 if [ "$SAFE_CH" -eq 1 ]; then
-  sec "[6/7] Matikan channel" "$(elapsed)"
   for ch in telegram whatsapp discord slack; do
-    if sudo -u "$OC_USER" -H env HOME="$OC_HOME" OPENCLAW_STATE_DIR="$STATE_DIR" bash -lc "cd $OC_HOME && openclaw config set channels.$ch.enabled false" >/dev/null 2>&1; then
-      ok "channels.$ch.enabled=false"; else warn "gagal set channels.$ch"; fi
+    OUT=$(sudo -u "$OC_USER" -H env HOME="$OC_HOME" OPENCLAW_STATE_DIR="$STATE_DIR" bash -lc "cd $OC_HOME && openclaw config set channels.$ch.enabled false" 2>&1 | tail -1)
+    case "$OUT" in
+      *Updated*|*updated*) ok "channels.$ch.enabled=false" ;;
+      *)
+        if python3 /tmp/oc-migrate-choff.py "$STATE_DIR/openclaw.json" "$ch" >/dev/null 2>&1; then
+          ok "channels.$ch.enabled=false ${GRY}(fallback tulis config)${R}"
+        else
+          warn "gagal set channels.$ch → $OUT"
+        fi ;;
+    esac
   done
+  chown "$OC_USER:$OC_GROUP" "$STATE_DIR/openclaw.json" 2>/dev/null || true
+  CH_NOW=$(ch_state)
+  if echo "$CH_NOW" | grep -q "=True"; then
+    bad "masih ada channel aktif: $CH_NOW"
+    warn "JANGAN jalankan gateway di sini selama token masih dipakai server lain"
+    printf "\n"; sec "Rollback" "$(elapsed)"
+    [ -f "$PRE" ] && tar xzf "$PRE" -C "$(dirname "$STATE_DIR")" && chown -R "$OC_USER:$OC_GROUP" "$STATE_DIR" && ok "state lama dipulihkan"
+    die "channel tidak bisa dimatikan otomatis — restore dibatalkan demi keamanan token"
+  fi
+  info "channel sekarang: $CH_NOW"
   hint "nyalakan lagi hanya di SATU host: openclaw config set channels.telegram.enabled true"
 else
   sec "[6/7] Channel" "$(elapsed)"
-  warn "channel dibiarkan apa adanya"
+  CH_NOW=$(ch_state)
+  warn "channel dibiarkan apa adanya: ${CH_NOW:-?}"
   hint "kalau token masih dipakai server lain → pakai --safe-channels (cegah bot rebutan)"
 fi
 
 printf "\n"
-sec "[7/7] Doctor + jalankan gateway" "$(elapsed)"
-AS_OC="sudo -u $OC_USER -H env HOME=$OC_HOME OPENCLAW_STATE_DIR=$STATE_DIR bash -lc"
-if [ "$OC_USER" = root ]; then AS_OC="env HOME=$OC_HOME OPENCLAW_STATE_DIR=$STATE_DIR bash -lc"; fi
-hb "openclaw doctor" bash -c "$AS_OC 'cd $OC_HOME && timeout 240 openclaw doctor 2>&1 | tail -3'" || warn "doctor melaporkan catatan (lihat di atas)"
-# arsip dari versi lebih lama → skema DB perlu dimigrasi sebelum gateway boleh start
-hb "doctor --fix (migrasi skema DB bila perlu)" bash -c "$AS_OC 'cd $OC_HOME && timeout 300 openclaw doctor --fix 2>&1 | tail -3'" \
-  && ok "migrasi/konvergensi selesai ${GRY}(${HB_ELAPSED}s)${R}" \
-  || warn "doctor --fix melaporkan catatan — lanjut, health check akan memutuskan"
-chown -R "$OC_USER:$OC_GROUP" "$STATE_DIR" 2>/dev/null || true
+sec "[7/7] Jalankan gateway + health check" "$(elapsed)"
 GW_OK=0
 if [ "$NO_START" -eq 1 ]; then
   info "--no-start: gateway tidak dinyalakan"
