@@ -23,7 +23,7 @@ DEFAULT_PORT="${OPENCLAW_GATEWAY_PORT:-18789}"
 BACKUP_DIR_DEFAULT="${OPENCLAW_BACKUP_DIR:-/root/openclaw-backups}"
 
 ACTION="${1:-}"; [ $# -gt 0 ] && shift || true
-DRY_RUN=0; NO_WS=0; STATE_DIR=""; OC_USER=""; TRANSFER=""; ARCHIVE=""; SAFE_CH=0; NO_START=0; FORCE_VERSION=0
+DRY_RUN=0; NO_WS=0; STATE_DIR=""; OC_USER=""; TRANSFER=""; ARCHIVE=""; SAFE_CH=0; NO_START=0; FORCE_VERSION=0; SKIP_VERIFY=0
 
 # ══════════════════════════════ UI ══════════════════════════════════════════
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -115,6 +115,8 @@ usage() {
       --safe-channels   matikan telegram/whatsapp/discord/slack setelah restore
       --no-start        jangan nyalakan gateway (uji aman)
       --force-version   lanjut walau versi arsip ≠ versi lokal
+      --skip-verify     lanjut walau verifikasi arsip gagal (mis. symlink absolut
+                        dari OpenClaw versi lama) — symlink tsb dibereskan otomatis
       --state-dir DIR   override deteksi lokasi state
       --user USER       override user pemilik state
 
@@ -142,6 +144,7 @@ while [ $# -gt 0 ]; do
     --safe-channels) SAFE_CH=1 ;;
     --no-start) NO_START=1 ;;
     --force-version) FORCE_VERSION=1 ;;
+    --skip-verify|--trust) SKIP_VERIFY=1 ;;
     --dry-run) DRY_RUN=1 ;;
     -h|--help) usage; exit 0 ;;
     *) die "Opsi tidak dikenal: $1 (pakai --help)" ;;
@@ -321,12 +324,27 @@ printf "\n"
 
 sec "[1/7] Verifikasi arsip" "$(elapsed)"
 kv "arsip" "$(basename "$ARCHIVE") ($(hsize "$ARCHIVE"))"
+VERIFY_LOG=/tmp/ocmigrate-cmd.log
 if hb "memeriksa arsip" openclaw backup verify "$ARCHIVE"; then
-  ARC_VER=$(grep -i "Runtime version" /tmp/ocmigrate-cmd.log | head -1 | awk '{print $3}')
-  ENTRIES=$(grep -io "entries scanned: [0-9]*" /tmp/ocmigrate-cmd.log | head -1 | grep -o "[0-9]*")
+  ARC_VER=$(grep -i "Runtime version" "$VERIFY_LOG" | head -1 | awk '{print $3}')
+  ENTRIES=$(grep -io "entries scanned: [0-9]*" "$VERIFY_LOG" | head -1 | grep -o "[0-9]*")
   ok "arsip valid ${GRY}(${HB_ELAPSED}s · ${ENTRIES:-?} entri · runtime ${ARC_VER:-?})${R}"
 else
-  tail -4 /tmp/ocmigrate-cmd.log | sed 's/^/      /'; die "arsip TIDAK valid — restore dibatalkan"
+  REASON=$(grep -i "verification failed" "$VERIFY_LOG" | head -1 | sed 's/.*failed: //')
+  if grep -qi "symbolic link target must be relative" "$VERIFY_LOG"; then
+    warn "arsip ditolak versi OpenClaw ini: ada symlink ABSOLUT (perilaku versi lama)"
+    hint "arsip tetap bisa direstore — symlink absolut dibereskan otomatis oleh script"
+    if [ "$SKIP_VERIFY" -eq 0 ]; then
+      printf "\n"; sec "Cara lanjut" "$(elapsed)"
+      printf "    ${GRY}a.${R} $( [ "$SKIP_VERIFY" -eq 0 ] && echo "tambahkan ${B}--skip-verify${R} (arsip dari server sendiri, sudah dipercaya)" )\n"
+      printf "    ${GRY}b.${R} atau upgrade server sumber ke versi yang sama lalu backup ulang\n\n"
+      die "verifikasi arsip gagal — jalankan ulang dengan --skip-verify untuk melanjutkan"
+    fi
+    warn "--skip-verify aktif → lanjut (symlink absolut akan dibereskan)"
+  else
+    tail -4 "$VERIFY_LOG" | sed 's/^/      /'
+    [ "$SKIP_VERIFY" -eq 1 ] && warn "--skip-verify aktif → lanjut walau verifikasi gagal" || die "arsip TIDAK valid — restore dibatalkan (lihat alasan di atas)"
+  fi
 fi
 LOCAL_VER="$CUR_VER"
 kv "versi lokal" "$LOCAL_VER"
@@ -372,6 +390,18 @@ hb "ekstrak arsip" tar xzf "$ARCHIVE" -C "$STAGE" || die "ekstraksi gagal"
 SRC=$(find "$STAGE" -maxdepth 5 -type d -name ".openclaw" | head -1)
 [ -n "$SRC" ] || die "state (.openclaw) tidak ditemukan di dalam arsip"
 info "sumber di arsip: $(echo "$SRC" | sed "s|$STAGE/||")  ($(hsize "$SRC"))"
+# symlink absolut (ciri arsip versi lama) → dibuat relatif, atau dibuang kalau targetnya tidak ada
+ABS_LINKS=$(find "$SRC" -type l -lname '/*' 2>/dev/null | wc -l | tr -d ' ')
+if [ "${ABS_LINKS:-0}" -gt 0 ]; then
+  FIXED=0; DROPPED=0
+  while IFS= read -r l; do
+    [ -z "$l" ] && continue
+    tgt=$(readlink "$l")
+    if [ -e "$tgt" ]; then ln -sfn "$(realpath --relative-to="$(dirname "$l")" "$tgt" 2>/dev/null || echo "$tgt")" "$l"; FIXED=$((FIXED+1))
+    else rm -f "$l"; DROPPED=$((DROPPED+1)); fi
+  done < <(find "$SRC" -type l -lname '/*' 2>/dev/null)
+  ok "symlink absolut dibereskan: ${FIXED} dibuat relatif, ${DROPPED} dibuang (target tidak ada)"
+fi
 mkdir -p "$STATE_DIR"
 hb "menyalin state" rsync -aHAX --delete "$SRC"/ "$STATE_DIR"/ || die "sinkronisasi state gagal"
 chown -R "$OC_USER:$OC_GROUP" "$STATE_DIR"; chmod 2775 "$(dirname "$STATE_DIR")" "$STATE_DIR" 2>/dev/null || true
