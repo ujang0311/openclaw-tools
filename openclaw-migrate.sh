@@ -411,7 +411,12 @@ printf "\n"
 sec "[7/7] Doctor + jalankan gateway" "$(elapsed)"
 AS_OC="sudo -u $OC_USER -H env HOME=$OC_HOME OPENCLAW_STATE_DIR=$STATE_DIR bash -lc"
 if [ "$OC_USER" = root ]; then AS_OC="env HOME=$OC_HOME OPENCLAW_STATE_DIR=$STATE_DIR bash -lc"; fi
-hb "openclaw doctor" bash -c "$AS_OC 'cd $OC_HOME && timeout 240 openclaw doctor 2>&1 | tail -3'" || warn "doctor melaporkan catatan"
+hb "openclaw doctor" bash -c "$AS_OC 'cd $OC_HOME && timeout 240 openclaw doctor 2>&1 | tail -3'" || warn "doctor melaporkan catatan (lihat di atas)"
+# arsip dari versi lebih lama → skema DB perlu dimigrasi sebelum gateway boleh start
+hb "doctor --fix (migrasi skema DB bila perlu)" bash -c "$AS_OC 'cd $OC_HOME && timeout 300 openclaw doctor --fix 2>&1 | tail -3'" \
+  && ok "migrasi/konvergensi selesai ${GRY}(${HB_ELAPSED}s)${R}" \
+  || warn "doctor --fix melaporkan catatan — lanjut, health check akan memutuskan"
+chown -R "$OC_USER:$OC_GROUP" "$STATE_DIR" 2>/dev/null || true
 GW_OK=0
 if [ "$NO_START" -eq 1 ]; then
   info "--no-start: gateway tidak dinyalakan"
