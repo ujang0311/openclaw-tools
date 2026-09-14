@@ -149,3 +149,60 @@ Aksi `backup`/`restore` **tidak bergantung pada subcommand `restore`** (arsip di
 | Backup ditolak saat upgrade | OpenClaw menolak backup sebelum migrasi | Script memberi pesan + lanjut (rollback point tetap ada) |
 | Health check gagal padahal masih migrasi | VM kecil butuh >30 detik | Tunggu sampai 180 detik (`OPENCLAW_START_TIMEOUT`) |
 
+---
+
+## v1.2.0 — deteksi otomatis penuh + tampilan shell modern
+
+Semua path kini **dideteksi otomatis** — tidak perlu diarahkan manual:
+
+| Yang dideteksi | Sumber (berurutan) |
+|---|---|
+| **State dir** | `--state-dir` → env `OPENCLAW_STATE_DIR` → unit systemd → **env proses gateway** (`/proc/<pid>/environ`) → `openclaw config file` → pemindaian filesystem (`/opt/openclaw/.openclaw`, `~/.openclaw`, `/root/.openclaw`, `/home/*/.openclaw`) |
+| **User pemilik** | `User=` unit systemd → owner state dir → user `openclaw` → root |
+| **Cara gateway jalan** | systemd system → systemd user → screen session → proses manual |
+| **Port** | env unit (`OPENCLAW_GATEWAY_PORT`) → `.env` → default 18789 |
+| **Path lama di DB** | manifest arsip + pemindaian isi database (untuk remap otomatis) |
+
+Perintah baru untuk melihat hasil deteksi tanpa mengubah apa pun:
+
+```bash
+curl -sS .../openclaw-migrate.sh | bash -s -- detect
+```
+
+Contoh keluaran (VM App Catalog IDCloudHost — tidak ada flag yang dipakai):
+
+```
+  ◆ Deteksi otomatis  0s
+    ├ state dir    /opt/openclaw/.openclaw  (693M)
+    │ └ sumber      HOME proses gateway (pid 12308)
+    ├ owner        openclaw:openclaw  (unit systemd)
+    ├ openclaw     2026.9.4  /usr/bin/openclaw
+    ├ node / npm   v24.21.0 / 11.19.0
+    └ gateway      systemd (system) · port 18789 · active (pid 12308)
+```
+
+Tampilan juga dirombak: banner, panel, **spinner** saat proses panjang, panel
+ringkasan berwarna, warning eksplisit, dan blok "langkah berikutnya".
+
+### Fitur baru lain di v1.2.0
+
+| Fitur | Keterangan |
+|---|---|
+| `restore --skip-verify` | Lanjut walau `openclaw backup verify` menolak arsip. Kasus nyata: arsip buatan **2026.7.1-2** berisi **symlink absolut** yang ditolak versi **2026.9.4** (`Archive symbolic link target must be relative`). Script membereskan symlink itu otomatis (dibuat relatif, atau dibuang bila targetnya tidak ada) |
+| Urutan migrasi benar | `doctor --fix` dijalankan **sebelum** mematikan channel — CLI menolak menulis config selama skema DB belum termigrasi |
+| Keamanan channel | Setelah `--safe-channels`: nilai dibaca ulang dari config. Kalau masih ada channel menyala → restore dibatalkan (rollback) supaya token tidak rebutan dengan server produksi |
+| Fallback tulis config | Kalau CLI gagal, channel dimatikan lewat `channel-off.py` (tulis JSON atomik) |
+
+### Tip: hindari script basi dari cache CDN
+
+`raw.githubusercontent.com` bisa menyajikan versi lama beberapa menit. Kalau perilaku script
+tidak sesuai dokumentasi, pakai jalur/anti-cache:
+
+```bash
+# jalur refs (lebih fresh)
+curl -sS https://raw.githubusercontent.com/ujang0311/openclaw-tools/refs/heads/main/openclaw-migrate.sh | bash -s -- detect
+# atau tambah query anti-cache
+curl -sS "https://raw.githubusercontent.com/ujang0311/openclaw-tools/main/openclaw-migrate.sh?cb=$(date +%s)" | bash -s -- detect
+```
+
+Cek versi yang kamu jalankan dari banner (`v1.2.0`) atau `grep VERSION_SCRIPT`.
