@@ -23,6 +23,7 @@ SELF_URL="${OPENCLAW_MIGRATE_URL:-https://raw.githubusercontent.com/ujang0311/op
 SERVICE_NAME="${OPENCLAW_SERVICE:-openclaw}"
 DEFAULT_PORT="${OPENCLAW_GATEWAY_PORT:-18789}"
 BACKUP_DIR_DEFAULT="${OPENCLAW_BACKUP_DIR:-/root/openclaw-backups}"
+REPO_RAW="${OPENCLAW_TOOLS_RAW:-https://raw.githubusercontent.com/ujang0311/openclaw-tools/main}"
 
 ACTION="${1:-}"; [ $# -gt 0 ] && shift || true
 DRY_RUN=0; NO_WS=0; STATE_DIR=""; OC_USER=""; TRANSFER=""; ARCHIVE=""; SAFE_CH=0; NO_START=0
@@ -273,6 +274,25 @@ rsync -aHAX --delete "$SRC"/ "$STATE_DIR"/ || die "sinkronisasi state gagal"
 chown -R "$OC_USER:$OC_GROUP" "$STATE_DIR"
 chmod 2775 "$(dirname "$STATE_DIR")" "$STATE_DIR" 2>/dev/null || true
 ok "state terpasang: $(hsize "$STATE_DIR"), $(ls "$STATE_DIR/agents" 2>/dev/null | wc -l) agen, $(find "$STATE_DIR" -name '*.sqlite' 2>/dev/null | wc -l) database"
+
+# path absolut state dir lama (mis. /root/.openclaw) masih tersimpan di dalam database.
+# Tanpa dipetakan, `openclaw doctor --fix` gagal (EACCES) & migrasi skema DB tidak jalan.
+OLD_STATE=$(python3 -c "
+import json,glob
+m=glob.glob('$STAGE/*/manifest.json')
+print(((json.load(open(m[0])).get('paths') or {}).get('stateDir','')) if m else '')
+" 2>/dev/null || echo "")
+REMAP=/tmp/remap-state-paths.py
+[ -s "$REMAP" ] || curl -fsS -m 30 "$REPO_RAW/remap-state-paths.py" -o "$REMAP" 2>/dev/null || true
+if [ -s "$REMAP" ]; then
+  ROUT=$(python3 "$REMAP" --state-dir "$STATE_DIR" ${OLD_STATE:+--old "$OLD_STATE"} --quiet 2>&1 | tail -1)
+  case "$ROUT" in
+    REMAP_OK*) ok "path state dipetakan ulang (${ROUT#REMAP_OK })"; chown -R "$OC_USER:$OC_GROUP" "$STATE_DIR" ;;
+    *) info "remap path: ${ROUT:-tidak ada perubahan}" ;;
+  esac
+else
+  warn "helper remap-state-paths.py tidak tersedia — lewati (cek state dir manual kalau doctor gagal)"
+fi
 
 if [ "$SAFE_CH" -eq 1 ]; then
   step "[6/7] Matikan channel (cegah rebutan token dengan server sumber)"
