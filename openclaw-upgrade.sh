@@ -211,6 +211,8 @@ if [ "$DO_BACKUP" -eq 1 ]; then
     if grep -qi "verification: passed\|verification passed" /tmp/oc-upgrade-backup.log; then
       ARSIP=$(ls -t "$BACKUP_DIR"/*openclaw-backup.tar.gz 2>/dev/null | head -1)
       ok "backup OK: $(basename "${ARSIP:-?}") ($(du -sh "${ARSIP:-/dev/null}" 2>/dev/null | cut -f1))"
+    elif grep -qi "schema migration" /tmp/oc-upgrade-backup.log; then
+      warn "backup ditolak OpenClaw: state DB butuh migrasi dulu. Jalankan (service mati): openclaw doctor --fix"
     else warn "backup tidak terverifikasi — cek /tmp/oc-upgrade-backup.log"; fi
   fi
 else info "--no-backup: dilewati"; fi
