@@ -140,12 +140,14 @@ kv "service" "$(svc_state)"
 # env milik unit systemd — supaya CLI dijalankan dengan HOME/state dir yang benar
 # (kalau tidak, CLI dijalankan sebagai root akan membaca /root/.openclaw, bukan state service)
 OC_USER=$(systemctl show "$SERVICE_NAME" -p User --value 2>/dev/null || true); [ -n "$OC_USER" ] || OC_USER=$(id -u openclaw >/dev/null 2>&1 && echo openclaw || echo root)
+OC_GROUP=$(id -gn "$OC_USER" 2>/dev/null || echo "$OC_USER")
 UNIT_ENV=$(systemctl show "$SERVICE_NAME" -p Environment --value 2>/dev/null || echo "")
 OC_HOME=$(printf '%s\n' "$UNIT_ENV" | tr ' ' '\n' | sed -n 's/^HOME=//p' | head -1)
 [ -n "$OC_HOME" ] || { OC_HOME=$(getent passwd "$OC_USER" | cut -d: -f6); [ -n "$OC_HOME" ] && [ "$OC_HOME" != "/" ] || OC_HOME=/opt/openclaw; }
 STATE_DIR=$(printf '%s\n' "$UNIT_ENV" | tr ' ' '\n' | sed -n 's/^OPENCLAW_STATE_DIR=//p' | head -1)
 [ -n "$STATE_DIR" ] || STATE_DIR="$OC_HOME/.openclaw"
 STATE_DB=$(ls "$STATE_DIR"/state/*.sqlite 2>/dev/null | head -1)
+PORT=$(printf '%s\n' "$UNIT_ENV" | tr ' ' '\n' | sed -n 's/^OPENCLAW_GATEWAY_PORT=//p' | head -1); [ -n "$PORT" ] || PORT=18789
 kv "user/home" "$OC_USER · $OC_HOME"
 kv "state dir" "$STATE_DIR$( [ -d "$STATE_DIR" ] && echo " ($(du -sh "$STATE_DIR" 2>/dev/null | cut -f1))" || echo ' (belum ada)')"
 
@@ -178,8 +180,13 @@ fi
 if [ -z "$NODE_MAJOR" ] && [ -n "$REQ_NODE" ]; then NODE_MAJOR=$(major_from_range "$REQ_NODE"); fi
 info "major Node yang akan dipasang: ${NODE_MAJOR:-<tidak perlu>}"
 
+SKIP_NPM=0
 if [ "$CUR_VER" = "$TARGET_VER" ] && [ "$NODE_OK" -eq 1 ]; then
-  printf "\n  ${GRN}${B}✓ Sudah versi terbaru ($CUR_VER) dan Node memenuhi syarat — tidak ada yang perlu dilakukan.${R}\n\n"; exit 0
+  if [ "$(svc_state)" = active ] && ss -tlnH 2>/dev/null | grep -q ":$PORT "; then
+    printf "\n  ${GRN}${B}✓ Sudah versi terbaru ($CUR_VER), Node cocok, dan gateway sehat — tidak ada yang perlu dilakukan.${R}\n\n"; exit 0
+  fi
+  SKIP_NPM=1
+  warn "versi sudah $TARGET_VER tapi gateway belum sehat → lanjut perbaikan (migrasi DB + start)"
 fi
 
 if [ "$CHECK" -eq 1 ]; then
@@ -197,6 +204,7 @@ fi
 step "[3/8] Backup state sebelum upgrade"
 if [ "$DO_BACKUP" -eq 1 ]; then
   mkdir -p "$BACKUP_DIR"; chmod 700 "$BACKUP_DIR" 2>/dev/null || true
+  chown "$OC_USER:$OC_GROUP" "$BACKUP_DIR" 2>/dev/null || true
   if [ "$OC_USER" = root ]; then run openclaw backup create --output "$BACKUP_DIR" --verify >/tmp/oc-upgrade-backup.log 2>&1
   else run as_oc "openclaw backup create --output $BACKUP_DIR --verify" >/tmp/oc-upgrade-backup.log 2>&1; fi
   if [ "$DRY" -eq 0 ]; then
@@ -238,7 +246,8 @@ GW_STOPPED=0
 if [ "$RUNMODE" = systemd ]; then run systemctl stop "$SERVICE_NAME"; GW_STOPPED=1
 elif [ "$RUNMODE" = screen ] || [ "$RUNMODE" = process ]; then run pkill -f 'openclaw gateway' || true; GW_STOPPED=1; fi
 [ "$DRY" -eq 0 ] && sleep 2
-run npm i -g "openclaw@$TARGET_VER" >/tmp/oc-upgrade-npm.log 2>&1
+if [ "$SKIP_NPM" -eq 1 ]; then info "lewati npm install — versi $TARGET_VER sudah terpasang"
+else run npm i -g "openclaw@$TARGET_VER" >/tmp/oc-upgrade-npm.log 2>&1; fi
 if [ "$DRY" -eq 0 ]; then
   NEW_VER=$(openclaw --version 2>&1 | head -1 | awk '{print $2}')
   [ "$NEW_VER" = "$TARGET_VER" ] && ok "terpasang: $NEW_VER" || { tail -8 /tmp/oc-upgrade-npm.log | sed 's/^/      /'; die "upgrade gagal (versi terdeteksi: $NEW_VER)"; }
@@ -264,7 +273,6 @@ fi
 
 # ── [7/8] Nyalakan + health check ──────────────────────────────────────────
 step "[7/8] Jalankan gateway + health check"
-PORT=$(systemctl show "$SERVICE_NAME" -p Environment --value 2>/dev/null | tr ' ' '\n' | sed -n 's/^OPENCLAW_GATEWAY_PORT=//p' | head -1); [ -n "$PORT" ] || PORT=18789
 HEALTH_OK=0
 if [ "$DO_RESTART" -eq 1 ] && [ "$DRY" -eq 0 ]; then
   case "$RUNMODE" in
