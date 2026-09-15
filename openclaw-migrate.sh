@@ -269,11 +269,26 @@ if [ "$ACTION" = backup ]; then
   if [ "$DRY_RUN" -eq 1 ]; then
     info "dry-run: openclaw backup create --output $BACKUP_DIR_DEFAULT --verify$( [ "$NO_WS" -eq 1 ] && echo ' --no-include-workspace' )"
   else
-    ARGS="openclaw backup create --output '$BACKUP_DIR_DEFAULT' --verify$( [ "$NO_WS" -eq 1 ] && echo ' --no-include-workspace' )"
+    # User service (mis. `openclaw`) tidak bisa menulis ke /root (mode 700), jadi arsip
+    # dibuat di staging di /tmp lalu DIPINDAHKAN sebagai root ke folder tujuan.
+    STAGING=$(mktemp -d /tmp/openclaw-backup-XXXXXX); chown "$OC_USER:$OC_GROUP" "$STAGING" 2>/dev/null || true
+    info "staging: $STAGING  →  tujuan: $BACKUP_DIR_DEFAULT"
+    ARGS="openclaw backup create --output '$STAGING' --verify$( [ "$NO_WS" -eq 1 ] && echo ' --no-include-workspace' )"
     if [ "$OC_USER" = root ]; then hb "membuat arsip + verifikasi" bash -c "$ARGS"
-    else hb "membuat arsip + verifikasi" sudo -u "$OC_USER" -H env HOME="$OC_HOME" OPENCLAW_STATE_DIR="$STATE_DIR" bash -lc "$ARGS"; fi
+    else hb "membuat arsip + verifikasi" sudo -u "$OC_USER" -H env HOME="$OC_HOME" OPENCLAW_HOME="$OC_HOME" OPENCLAW_STATE_DIR="$STATE_DIR" bash -c "$ARGS"; fi
     RC=$?
-    NEW=$(ls -t "$BACKUP_DIR_DEFAULT"/*openclaw-backup.tar.gz 2>/dev/null | head -1)
+    NEW=$(ls -t "$STAGING"/*openclaw-backup.tar.gz 2>/dev/null | head -1)
+    if [ "$RC" -eq 0 ] && [ -n "${NEW:-}" ]; then
+      mkdir -p "$BACKUP_DIR_DEFAULT" 2>/dev/null; chmod 700 "$BACKUP_DIR_DEFAULT" 2>/dev/null || true
+      if mv -f "$NEW" "$BACKUP_DIR_DEFAULT"/ 2>/dev/null; then
+        NEW="$BACKUP_DIR_DEFAULT/$(basename "$NEW")"
+        chown root:root "$NEW" 2>/dev/null || true; chmod 600 "$NEW" 2>/dev/null || true
+        ok "arsip dipindahkan ke $BACKUP_DIR_DEFAULT"
+      else
+        warn "gagal memindahkan ke $BACKUP_DIR_DEFAULT — arsip tetap di $NEW"
+      fi
+    fi
+    rm -rf "$STAGING" 2>/dev/null || true
     if [ "$RC" -eq 0 ] && [ -n "${NEW:-}" ]; then
       ok "arsip jadi ${GRN}${B}$(basename "$NEW")${R}  ${GRY}($(hsize "$NEW") · ${HB_ELAPSED}s)${R}"
       grep -iE "verification|volatile" /tmp/ocmigrate-cmd.log | sed 's/^/      /' | head -3
@@ -300,6 +315,15 @@ if [ "$ACTION" = backup ]; then
 
   printf "\n"
   sec "[3/3] Ringkasan" "$(elapsed)"
+  if [ "${RC:-0}" -ne 0 ] || [ -z "${NEW:-}" ]; then
+    _header "✖ BACKUP GAGAL" "$RED"
+    _blc "sebab        lihat pesan error di atas" "  ${GRY}sebab${R}        ${YLW}lihat pesan error di atas${R}"
+    _blc "state        $STATE_DIR ($(hsize "$STATE_DIR" 2>/dev/null || echo -))" "  ${GRY}state${R}        $STATE_DIR ${GRY}($(hsize "$STATE_DIR" 2>/dev/null || echo -))${R}"
+    _blc "saran        --output ke folder yang bisa ditulis user $OC_USER" "  ${GRY}saran${R}        ${YLW}--output ke folder yang bisa ditulis user $OC_USER${R}"
+    _blc "" ""; _foot "$RED"
+    printf "\n  ${GRY}Contoh:${R} openclaw-migrate.sh backup --output /opt/openclaw/openclaw-backups\n\n"
+    exit 1
+  fi
   _header "✔ BACKUP SELESAI" "$GRN"
   _blc "" ""
   _blc "arsip        $( [ -n "${NEW:-}" ] && basename "$NEW" || echo 'belum dibuat (dry-run)')" "  ${GRY}arsip${R}        $( [ -n "${NEW:-}" ] && basename "$NEW" || echo "${GRY}belum dibuat (dry-run)${R}")"
