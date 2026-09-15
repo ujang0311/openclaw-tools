@@ -15,7 +15,7 @@
 # ============================================================================
 set -u -o pipefail
 
-VERSION_SCRIPT="1.2.0"
+VERSION_SCRIPT="1.2.1"
 SELF_URL="${OPENCLAW_MIGRATE_URL:-https://raw.githubusercontent.com/ujang0311/openclaw-tools/main/openclaw-migrate.sh}"
 REPO_RAW="${OPENCLAW_TOOLS_RAW:-https://raw.githubusercontent.com/ujang0311/openclaw-tools/main}"
 SERVICE_NAME="${OPENCLAW_SERVICE:-openclaw}"
